@@ -239,3 +239,42 @@ def test_league_standings_cache_lasts_sixty_seconds(
     client.get_league_standings(314, page=1)
 
     assert len(calls) == 2
+
+
+def test_uncached_reads_leave_the_shared_cache_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def fake_open(request, timeout):
+        calls.append(request.full_url)
+        return FakeResponse({"picks": [], "entry_history": {}})
+
+    monkeypatch.setattr("webapp.fpl_client.request.urlopen", fake_open)
+    client = FplClient()
+    client._get_picks(1, 7, cache_ttl_seconds=0)
+    client._get_picks(1, 7, cache_ttl_seconds=0)
+    assert len(calls) == 2 and fpl_client._CACHE == {}
+
+
+def test_bootstrap_may_exceed_the_ordinary_response_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    big = {"events": [], "elements": [{"news": "x" * 1000}] * 2500}  # ~2.6 MB
+
+    monkeypatch.setattr("webapp.fpl_client.request.urlopen", lambda request, timeout: FakeResponse(big))
+    assert len(FplClient().get_bootstrap()["elements"]) == 2500
+    with pytest.raises(InvalidUpstreamResponse):
+        FplClient()._get_json("https://fantasy.premierleague.com/api/entry/9/")
+
+
+def test_concurrent_inserts_past_the_cache_limit_do_not_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setattr("webapp.fpl_client.request.urlopen",
+                        lambda request, timeout: FakeResponse({"id": 1}))
+    client = FplClient()
+    urls = [f"https://fantasy.premierleague.com/api/entry/{i}/" for i in range(2000)]
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        list(pool.map(client._get_json, urls))
+    assert len(fpl_client._CACHE) <= fpl_client.CACHE_LIMIT

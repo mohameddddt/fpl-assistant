@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass
 from typing import Final
@@ -12,6 +13,9 @@ FPL_API_BASE: Final[str] = "https://fantasy.premierleague.com/api"
 FPL_USER_AGENT: Final[str] = "FPL-Assistant/1.0 (public read-only lookup)"
 REQUEST_TIMEOUT_SECONDS: Final[float] = 10.0
 MAX_RESPONSE_BYTES: Final[int] = 2_000_000
+# bootstrap-static carries every player and was 1.79 MB by GW8 of 2026-27;
+# it grows through the season, so it gets its own ceiling.
+BOOTSTRAP_MAX_BYTES: Final[int] = 8_000_000
 CACHE_TTL_SECONDS: Final[float] = 20.0
 CACHE_LIMIT: Final[int] = 64
 
@@ -120,6 +124,10 @@ class _CacheEntry:
 
 
 _CACHE: dict[str, _CacheEntry] = {}
+# Request threads and the ownership sampler's worker pool share the cache, and
+# eviction iterates it: unguarded, a concurrent insert raised "dictionary
+# changed size during iteration" out of a sampling run.
+_CACHE_LOCK = threading.Lock()
 
 
 def _required_int(data: dict[str, object], key: str) -> int:
@@ -176,13 +184,18 @@ class FplClient:
     def _get_json(
         self, url: str, *, not_found_exc: type[FplClientError] = ManagerNotFound,
         cache_ttl_seconds: float = CACHE_TTL_SECONDS,
+        max_bytes: int = MAX_RESPONSE_BYTES,
     ) -> dict[str, object]:
+        """GET a public FPL JSON object. cache_ttl_seconds=0 neither reads nor
+        writes the shared cache, for bulk reads that would only evict it."""
         now = time.monotonic()
-        cached = _CACHE.get(url)
-        if cached is not None and cached.expires_at > now:
-            return cached.payload
-        if cached is not None:
-            _CACHE.pop(url, None)
+        if cache_ttl_seconds > 0:
+            with _CACHE_LOCK:
+                cached = _CACHE.get(url)
+                if cached is not None and cached.expires_at > now:
+                    return cached.payload
+                if cached is not None:
+                    _CACHE.pop(url, None)
 
         http_request = request.Request(
             url,
@@ -200,7 +213,7 @@ class FplClient:
                     raise UpstreamRateLimited("public FPL API rate limit reached")
                 if status < 200 or status >= 300:
                     raise UpstreamUnavailable(f"public FPL API returned HTTP {status}")
-                raw = response.read(MAX_RESPONSE_BYTES + 1)
+                raw = response.read(max_bytes + 1)
         except FplClientError:
             raise
         except error.HTTPError as exc:
@@ -212,16 +225,18 @@ class FplClient:
         except (error.URLError, TimeoutError, OSError) as exc:
             raise UpstreamUnavailable("public FPL API could not be reached") from exc
 
-        if len(raw) > MAX_RESPONSE_BYTES:
+        if len(raw) > max_bytes:
             raise InvalidUpstreamResponse("public FPL API response exceeded the size limit")
         try:
             payload = _mapping(json.loads(raw.decode("utf-8")), "API")
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise InvalidUpstreamResponse("public FPL API returned invalid JSON") from exc
-        _CACHE[url] = _CacheEntry(now + cache_ttl_seconds, payload)
-        if len(_CACHE) > CACHE_LIMIT:
-            oldest = min(_CACHE, key=lambda key: _CACHE[key].expires_at)
-            _CACHE.pop(oldest, None)
+        if cache_ttl_seconds > 0:
+            with _CACHE_LOCK:
+                _CACHE[url] = _CacheEntry(now + cache_ttl_seconds, payload)
+                if len(_CACHE) > CACHE_LIMIT:
+                    oldest = min(_CACHE, key=lambda key: _CACHE[key].expires_at)
+                    _CACHE.pop(oldest, None)
         return payload
 
     def get_entry(self, entry_id: int) -> ManagerSummary:
@@ -232,7 +247,8 @@ class FplClient:
         try:
             resolved_id = _required_int(data, "id")
         except InvalidUpstreamResponse:
-            _CACHE.pop(url, None)
+            with _CACHE_LOCK:
+                _CACHE.pop(url, None)
             raise
         first = data.get("player_first_name")
         last = data.get("player_last_name")
@@ -250,10 +266,12 @@ class FplClient:
             team_value=_optional_float(data, "value", 10.0),
         )
 
-    def _get_picks(self, entry_id: int, gameweek: int) -> tuple[dict[str, object], list[ManagerPick]]:
+    def _get_picks(
+        self, entry_id: int, gameweek: int, cache_ttl_seconds: float = CACHE_TTL_SECONDS,
+    ) -> tuple[dict[str, object], list[ManagerPick]]:
         url = self._url(f"entry/{entry_id}/event/{gameweek}/picks/")
         try:
-            data = self._get_json(url)
+            data = self._get_json(url, cache_ttl_seconds=cache_ttl_seconds)
         except ManagerNotFound as exc:
             raise LineupNotFound(f"no public picks for GW{gameweek}") from exc
         raw_picks = data.get("picks")
@@ -349,7 +367,7 @@ class FplClient:
     def get_bootstrap(self) -> dict[str, object]:
         """bootstrap-static: events (with is_current), total_players and elements."""
         return self._get_json(self._url("bootstrap-static/"), not_found_exc=UpstreamUnavailable,
-                              cache_ttl_seconds=600.0)
+                              cache_ttl_seconds=600.0, max_bytes=BOOTSTRAP_MAX_BYTES)
 
     def get_league_standings(self, league_id: int, page: int = 1) -> LeagueStandingsPage:
         """One page of a classic league's standings: manager name, team name,

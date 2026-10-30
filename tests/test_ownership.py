@@ -37,7 +37,7 @@ class FakeClient:
                                    entries=tuple(LeagueStandingsEntry(e, '', '', None, None)
                                                  for e in entries))
 
-    def _get_picks(self, entry, gameweek):
+    def _get_picks(self, entry, gameweek, cache_ttl_seconds=None):
         if entry in self.rate_limited:
             self.rate_limited.discard(entry)
             raise UpstreamRateLimited('slow down')

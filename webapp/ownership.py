@@ -142,7 +142,9 @@ def fetch_lineups(client, entries: list[int], gameweek: int, throttle: Throttle,
     """(picks, active_chip) for every entry that answers, and how many failed."""
     def one(entry: int):
         try:
-            data, picks = _with_retry(lambda: client._get_picks(entry, gameweek), throttle)
+            # Uncached: a thousand one-off reads would evict every manager lookup.
+            data, picks = _with_retry(
+                lambda: client._get_picks(entry, gameweek, cache_ttl_seconds=0), throttle)
         except (LineupNotFound, ManagerNotFound, FplClientError):
             return None
         return picks, data.get('active_chip')
