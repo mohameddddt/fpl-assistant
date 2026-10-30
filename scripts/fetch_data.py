@@ -311,6 +311,187 @@ def unfinished_clubs(fixtures: pd.DataFrame, gw: int) -> set:
     return set(pending['team_h'].astype(int)) | set(pending['team_a'].astype(int))
 
 
+def fixture_ids(team_h: pd.Series, team_a: pd.Series) -> pd.Series:
+    """A fixture id that names the match: home club id * 100 + away club id.
+
+    olbauday carries no FPL fixture id, and numbering its rows 1..n gave the
+    same match a different id whenever the upstream row order changed (four
+    GW8 ids moved between two fetches a week apart). FotMob's player_match.csv
+    and the Stats Lab join on (element, fixture), so a refresh without a FotMob
+    run quietly detached or misfiled their rows. Each pairing is played once a
+    season, so this survives reordering and rescheduling. NaN where a club is
+    unmapped; those rows are dropped with it.
+    """
+    return team_h * 100 + team_a
+
+
+def fixtures_by_club(fixtures: pd.DataFrame) -> dict:
+    """{(gw, team_id): [fixture, ...]} in kickoff order, each fixture a dict of
+    opponent_team, was_home, kickoff_time, fixture, team_score, opponent_score.
+
+    A list, because a double gameweek is two fixtures for one club. Keyed on
+    (gw, club) with one value, the second match overwrote the first.
+    """
+    lookup: dict = {}
+    if fixtures.empty:
+        return lookup
+    for _, row in fixtures.iterrows():
+        gw = int(row['event'])
+        home, away = int(row['team_h']), int(row['team_a'])
+        kickoff = row.get('kickoff_time', '')
+        kickoff = '' if pd.isna(kickoff) else str(kickoff)
+        fid = int(row.get('id', 0))
+        hs = pd.to_numeric(row.get('team_h_score'), errors='coerce')
+        as_ = pd.to_numeric(row.get('team_a_score'), errors='coerce')
+        for team, opponent, at_home, mine, theirs in ((home, away, True, hs, as_),
+                                                      (away, home, False, as_, hs)):
+            lookup.setdefault((gw, team), []).append({
+                'opponent_team': opponent, 'was_home': at_home,
+                'kickoff_time': kickoff, 'fixture': fid,
+                'team_score': mine, 'opponent_score': theirs,
+            })
+    for matches in lookup.values():
+        matches.sort(key=lambda m: m['kickoff_time'])
+    return lookup
+
+
+FPL_API = 'https://fantasy.premierleague.com/api'
+
+# What one match contributes, in FPL's per-fixture history (element-summary).
+# The rest of a row -- price, ownership, the week's transfers -- belongs to the
+# gameweek, and both halves of a double carry it, as vaastav's files do.
+MATCH_COLUMNS = (
+    'total_points', 'minutes', 'goals_scored', 'assists', 'clean_sheets',
+    'goals_conceded', 'own_goals', 'penalties_saved', 'penalties_missed',
+    'yellow_cards', 'red_cards', 'saves', 'bonus', 'bps', 'ict_index',
+    'influence', 'creativity', 'threat', 'expected_goals', 'expected_assists',
+    'expected_goal_involvements', 'expected_goals_conceded', 'starts',
+    'clearances_blocks_interceptions', 'recoveries', 'tackles',
+)
+
+
+def element_history_reader(pause: float = 0.5):
+    """element id -> FPL's per-fixture history for this season, or None.
+
+    Read only for players who appeared in a double, at most once per player
+    per fetch, with a pause between calls: a double for two clubs is ~30 reads.
+    """
+    cache: dict = {}
+
+    def history_for(element: int):
+        if element not in cache:
+            try:
+                data = json.loads(http_get(f"{FPL_API}/element-summary/{element}/",
+                                           tries=3, timeout=30))
+                cache[element] = list(data.get('history') or [])
+            except Exception as exc:  # noqa: BLE001 -- reported, row held back
+                print(f"      element {element}: no FPL history ({type(exc).__name__})")
+                cache[element] = None
+            time.sleep(pause)
+        return cache[element]
+
+    return history_for
+
+
+def _played(row: dict) -> bool:
+    """Minutes or points on the row; NaN counts as neither."""
+    values = pd.to_numeric(pd.Series([row.get('minutes'), row.get('total_points')]),
+                           errors='coerce').fillna(0)
+    return bool((values != 0).any())
+
+
+def _with_fixture(row: dict, match: dict) -> dict:
+    out = dict(row)
+    out['opponent_team'] = match['opponent_team']
+    out['was_home'] = match['was_home']
+    out['kickoff_time'] = match['kickoff_time']
+    out['fixture'] = match['fixture']
+    home = match['was_home']
+    out['team_h_score'] = match['team_score'] if home else match['opponent_score']
+    out['team_a_score'] = match['opponent_score'] if home else match['team_score']
+    return out
+
+
+def split_double(row: dict, matches: list, gw: int, history_for) -> list | None:
+    """One olbauday row covering several matches -> one row per match.
+
+    olbauday publishes a player's gameweek as one row, so in a double it is the
+    sum of both games filed under one of them. Every rolling feature then reads
+    two matches as one, and the second opponent disappears. A player who did not
+    play is split into zero rows without a network read; anyone else takes each
+    match's numbers from FPL's per-fixture history. None when that history is
+    unavailable or does not account for every match, so the caller can hold the
+    row back rather than invent a split.
+    """
+    if not _played(row):
+        blank = {**row, **{c: 0 for c in MATCH_COLUMNS if c in row}}
+        return [_with_fixture(blank, m) for m in matches]
+
+    history = history_for(int(row['element']))
+    if history is None:
+        return None
+    week = [h for h in history if int(h.get('round', -1)) == gw]
+    out = []
+    for match in matches:
+        found = [h for h in week
+                 if int(h.get('opponent_team', -1)) == match['opponent_team']
+                 and bool(h.get('was_home')) == match['was_home']]
+        if len(found) != 1:
+            return None
+        played = dict(row)
+        for column in MATCH_COLUMNS:
+            if column in row and column in found[0]:
+                played[column] = pd.to_numeric(found[0][column], errors='coerce')
+        out.append(_with_fixture(played, match))
+    split_points = sum(float(r.get('total_points') or 0) for r in out)
+    if split_points != float(row.get('total_points') or 0):
+        print(f"      element {row['element']} GW{gw}: FPL's matches sum to "
+              f"{split_points:g} pts, the gameweek row says "
+              f"{row.get('total_points')}; using FPL's per-match numbers")
+    return out
+
+
+def attach_fixtures(gw_out: pd.DataFrame, team_ids: pd.Series, lookup: dict,
+                    gw: int, history_for) -> pd.DataFrame:
+    """Give each row its fixture, as one row per player per match.
+
+    One match: the row takes it. Two or more (a double): split_double. None (a
+    blank): a zero-minute row is dropped -- it is not a missed match, and every
+    rolling feature would read it as one -- while a row with minutes keeps blank
+    fixture fields and is reported, since it means a club was mapped wrongly.
+    opponent_team is left as a club id; the caller maps it to a name.
+    """
+    rows, blanks, held, doubles = [], 0, [], 0
+    empty_fixture = {'opponent_team': None, 'was_home': None, 'kickoff_time': None,
+                     'fixture': None, 'team_h_score': None, 'team_a_score': None}
+    for row, team in zip(gw_out.to_dict('records'), team_ids):
+        matches = [] if pd.isna(team) else lookup.get((gw, int(team)), [])
+        if len(matches) == 1:
+            rows.append(_with_fixture(row, matches[0]))
+        elif matches:
+            split = split_double(row, matches, gw, history_for)
+            if split is None:
+                held.append(row['element'])
+            else:
+                rows.extend(split)
+                doubles += 1
+        elif _played(row):
+            print(f"    GW{gw}: element {row['element']} has minutes but its club "
+                  f"has no fixture; kept without one")
+            rows.append({**row, **empty_fixture})
+        else:
+            blanks += 1
+    if doubles:
+        print(f"    GW{gw}: {doubles} players split across their double gameweek")
+    if blanks:
+        print(f"    GW{gw}: {blanks} zero-minute rows dropped for clubs without a match")
+    if held:
+        print(f"    GW{gw}: WARNING {len(held)} double-gameweek rows held back "
+              f"(no per-match split available): {held[:10]}")
+    columns = list(gw_out.columns) + [c for c in empty_fixture if c not in gw_out.columns]
+    return pd.DataFrame(rows, columns=columns)
+
+
 def fetch_season_olbauday(local_season: str, force: bool) -> dict:
     """Download from olbauday/FPL-Core-Insights and write vaastav-format files."""
     print(f"\n{'=' * 72}\n{local_season} (source: olbauday)\n{'=' * 72}")
@@ -500,7 +681,7 @@ def fetch_season_olbauday(local_season: str, force: bool) -> dict:
             id_to_away_strength = dict(zip(teams_out['id'],
                                            teams_out['strength_overall_away']))
             fix_out = pd.DataFrame({
-                'id': range(1, len(fix_df) + 1),   # synthetic fixture ID
+                'id': fixture_ids(team_h_ids, team_a_ids),
                 'event': fix_df['gameweek'].astype(int),
                 'team_h': team_h_ids,
                 'team_a': team_a_ids,
@@ -517,8 +698,8 @@ def fetch_season_olbauday(local_season: str, force: bool) -> dict:
             # Drop rows where team mapping failed (non-PL teams that slipped
             # through the tournament filter).
             fix_out = fix_out.dropna(subset=['team_h', 'team_a'])
-            fix_out[['team_h', 'team_a']] = (
-                fix_out[['team_h', 'team_a']].astype(int)
+            fix_out[['id', 'team_h', 'team_a']] = (
+                fix_out[['id', 'team_h', 'team_a']].astype(int)
             )
             save_df(fix_out, fixtures_path)
             fixtures_out = fix_out
@@ -530,21 +711,8 @@ def fetch_season_olbauday(local_season: str, force: bool) -> dict:
         skipped += 1
         print(f"    fixtures.csv                     (skipped)")
 
-    # Build fixture lookup
-    # {(gw, team_id): (opponent_id, was_home, kickoff_time, fixture_id,
-    #                  team_score, opponent_score)}
-    fixture_lookup: dict = {}
-    if not fixtures_out.empty:
-        for _, row in fixtures_out.iterrows():
-            gw_n = int(row['event'])
-            h = int(row['team_h'])
-            a = int(row['team_a'])
-            kt = str(row.get('kickoff_time', '') or '')
-            fid = int(row.get('id', 0))
-            hs = pd.to_numeric(row.get('team_h_score'), errors='coerce')
-            as_ = pd.to_numeric(row.get('team_a_score'), errors='coerce')
-            fixture_lookup[(gw_n, h)] = (a, True, kt, fid, hs, as_)
-            fixture_lookup[(gw_n, a)] = (h, False, kt, fid, as_, hs)
+    fixture_lookup = fixtures_by_club(fixtures_out)
+    history_for = element_history_reader()
 
     # ---------------------------------------------------------- per-GW stats
     print("  Fetching per-GW player stats …")
@@ -652,28 +820,13 @@ def fetch_season_olbauday(local_season: str, force: bool) -> dict:
                       f"their match finishes")
                 gw_out, team_ids = gw_out[~unplayed].copy(), team_ids[~unplayed]
 
-            _blank = (None, None, None, None, None, None)
-
-            def _lookup(tid, idx):
-                if pd.isna(tid):
-                    return None
-                return fixture_lookup.get((gw, int(tid)), _blank)[idx]
-
-            opponent_ids = team_ids.apply(lambda t: _lookup(t, 0))
-            gw_out['opponent_team'] = (opponent_ids
+            # One row per fixture: opponent, venue, kickoff (build_dataset's
+            # game_number), fixture id (add_expected_stats' join key) and the
+            # scoreline. Doubles are split, blanks dropped.
+            gw_out = attach_fixtures(gw_out, team_ids, fixture_lookup, gw,
+                                     history_for)
+            gw_out['opponent_team'] = (gw_out['opponent_team']
                                        .map(team_id_to_name).fillna(''))
-            gw_out['was_home'] = team_ids.apply(lambda t: _lookup(t, 1))
-            # kickoff_time — needed by build_dataset's game_number assignment.
-            gw_out['kickoff_time'] = team_ids.apply(lambda t: _lookup(t, 2))
-            # fixture — join key used by add_expected_stats in build_dataset.
-            gw_out['fixture'] = team_ids.apply(lambda t: _lookup(t, 3))
-            # The scoreline, which the feature stage turns into my_team_score,
-            # opponent_team_score and result.
-            team_score = team_ids.apply(lambda t: _lookup(t, 4))
-            opp_score = team_ids.apply(lambda t: _lookup(t, 5))
-            home = gw_out['was_home'].fillna(False).astype(bool)
-            gw_out['team_h_score'] = team_score.where(home, opp_score)
-            gw_out['team_a_score'] = opp_score.where(home, team_score)
 
             save_df(gw_out, gw_path)
             all_gw_frames.append(gw_out)
