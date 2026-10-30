@@ -167,3 +167,30 @@ Stats Lab page (presets, scatter + team xG table, sortable sticky table with per
 ### Exact next action
 
 Review the `stats-lab-preview` branch (Vercel preview, or `git checkout stats-lab-preview` and run the app); if approved, `git checkout main && git merge stats-lab-preview && git push`. Then the double-gameweek fetch fix above, before FPL announces the first double.
+
+## Session 2026-10-30: double gameweeks, stable fixture ids, client races, Slice A leftovers
+
+Pulled `origin/main` (25 commits, to `a9ac34e7`). An uncommitted local draft of B1 (effective ownership) predated upstream's own B1 (`11e80f19`) and conflicted with it in all seven files; it is kept as `git stash` entry "local B1 ownership draft (superseded by upstream 11e80f19)". Its two fixes upstream lacked were ported (below); the rest is redundant.
+
+### Implemented
+
+- **Double gameweeks in the live fetch** (`scripts/fetch_data.py`). The fixture lookup is now `{(gw, club): [fixtures in kickoff order]}`. olbauday's one-row-per-gameweek is split into one row per match: a player with no minutes and no points splits into zero rows without a network read; anyone else takes each match's numbers (`MATCH_COLUMNS`) from FPL's `element-summary/<id>/` history, matched on (round, opponent, venue), with the week's price, ownership and transfers on both halves, as vaastav does. If that history is unavailable or does not cover every match, the row is held back with a warning (the refresh always fetches with `--force`, so it is retried next run) rather than filed under one fixture.
+- **Blank gameweeks**: a zero-minute row for a club with no match is dropped (it is not a missed match, and every rolling feature would read it as one). A row with minutes but no fixture is kept and reported as a club-mapping problem.
+- **Stable fixture ids**: `id = home club id * 100 + away club id`. They were `range(1, n+1)` over olbauday's row order, which moves between fetches (upstream's `a9ac34e7` rewrote 974 lines of an unchanged GW1 this way; between two fetches a week apart, GW6 swapped 55/56 and four GW8 ids moved). FotMob's `player_match.csv` and the Stats Lab join on (element, fixture), so any refresh without `--with-fotmob` detached or misfiled their rows.
+- **FPL client** (`webapp/fpl_client.py`): the shared response cache is guarded by a lock. The ownership sampler's thread pool inserts ~1,000 entries, and eviction iterates the dict, so an unguarded insert could raise "dictionary changed size during iteration" and kill the run (it is not an `FplClientError`, so `fetch_lineups` did not catch it). Bulk pick reads now pass `cache_ttl_seconds=0` and leave the cache alone, rather than evicting every manager lookup. bootstrap-static has its own 8 MB ceiling: it was 1.79 MB of the 2 MB limit at GW8 and grows weekly.
+- **Free Hit / Wildcard in/out lists** (deferred from Slice A): evidence now carries `players_out` / `players_in` (name, club, position, projection over the chip's weeks, highest first); the chip card's "Why this choice" lists them.
+- **Transfer Studio reads the shared free transfers** (deferred from A1): it starts from `storedSquad.freeTransfers` ("Synced from FPL" / "From Chips page" under the stepper); changes there stay a what-if and are not written back, so they never turn an FPL-synced value into a manual one.
+- **Deadline board reads the chip plan** (deferred from A5.7): the Chips page saves its last full-squad `chip_plan` (`fpl-assistant-chip-plan`, keyed by season, gameweek and sorted squad); My Team's board flags "The chip plan plays Bench Boost this week (+12.9); you have not planned it" or names the next planned chip, without re-running the solve.
+
+### Verification
+
+- `python -m pytest -q tests`: 437 passed (426 before; new: 7 fetch tests for doubles, blanks and ids; 3 client tests incl. 2,000 concurrent inserts over 16 threads; 1 chip evidence test).
+- Patched fetch run on a scratch copy of 2026-27 against live olbauday: GW1-7 identical to the committed `merged_gw.csv` in every column but `fixture`; GW8 arrives with 669 rows, none dropped or split (no doubles or blanks yet); all 5,254 rows' fixture ids resolve to their own GW, club and venue.
+- `npm exec tsc -- --noEmit`, `npm run build` pass; `eslint` on the touched files reports the same pre-existing findings as before, none new.
+- Browser (1440 and 375): chip cards list Free Hit GW15 and Wildcard GW15-20 outs/ins; the deadline board names the engine's Bench Boost; the studio shows the shared count. No page-level horizontal overflow; console errors only from the dev-only react-grab script.
+
+### Not done / caveats
+
+- A double's per-match split needs FPL's history to have both matches; until it does, those players' rows for that week are absent (logged), not wrong.
+- The fixture-id change renumbers every 2026-27 fixture once; re-run `--with-fotmob` after the next fetch so `player_match.csv` carries the new ids (it rebuilds from its cache without refetching).
+- Visual work is still on `stats-lab-preview`, awaiting review. It touches the chips page, Transfer Studio and team page too; expect small merge conflicts there.
