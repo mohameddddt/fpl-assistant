@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useApp } from "@/components/providers/app-provider";
 import { fromTenths } from "@/lib/finance";
 import { money } from "@/lib/format";
-import { CHIP_INVENTORY_KEY } from "@/lib/storage-keys";
+import { CHIP_INVENTORY_KEY, CHIP_PLAN_KEY, chipPlanSquadKey, isStoredChipPlan } from "@/lib/storage-keys";
 import {
   heldWeekKey, isHeldWeek, isSavedTransferDraft, squadFingerprint, transferDraftKey,
 } from "@/lib/transfer-planning";
@@ -34,6 +34,8 @@ interface LocalFacts {
   savedMoves: number | null;
   inventoryEntered: boolean;
   plannedThisWeek: string | null;
+  /** The engine's next chip for this squad, from the Chips page's last run. */
+  enginePlan: { chip: string; gw: number; gain: number | null } | null;
 }
 
 const CHIP_NAMES: Record<string, string> = {
@@ -52,7 +54,8 @@ function readJson(key: string): unknown {
   }
 }
 
-function readLocalFacts(season: string, gameweek: number | null, fingerprint: string): LocalFacts {
+function readLocalFacts(season: string, gameweek: number | null, fingerprint: string,
+                        squadKey: string): LocalFacts {
   const hold = readJson(heldWeekKey(season));
   const draft = readJson(transferDraftKey(season));
   const chips = readJson(CHIP_INVENTORY_KEY);
@@ -61,6 +64,11 @@ function readLocalFacts(season: string, gameweek: number | null, fingerprint: st
   const planned = seasonMatches && Array.isArray(chipRecord?.plannedChips)
     ? (chipRecord.plannedChips as Array<Record<string, unknown>>).find((entry) => entry.gw === gameweek)
     : undefined;
+  const engine = readJson(CHIP_PLAN_KEY);
+  const enginePlan = isStoredChipPlan(engine) && engine.season === season && engine.squad === squadKey &&
+    engine.gameweek === gameweek
+    ? [...engine.plan].filter((entry) => entry.gw >= (gameweek ?? 0)).sort((a, b) => a.gw - b.gw)[0] ?? null
+    : null;
   return {
     held: isHeldWeek(hold) && hold.season === season && hold.gameweek === gameweek &&
       hold.fingerprint === fingerprint,
@@ -69,6 +77,7 @@ function readLocalFacts(season: string, gameweek: number | null, fingerprint: st
       : null,
     inventoryEntered: seasonMatches && Boolean(chipRecord?.first_half || chipRecord?.second_half),
     plannedThisWeek: typeof planned?.chip === "string" ? CHIP_NAMES[planned.chip] ?? planned.chip : null,
+    enginePlan,
   };
 }
 
@@ -78,11 +87,12 @@ export function DeadlineBoard() {
   const season = snapshot?.season ?? null;
   const gameweek = snapshot?.gameweek ?? null;
   const fingerprint = season ? squadFingerprint(season, squadElements, storedSquad?.finance ?? null) : "";
+  const squadKey = chipPlanSquadKey(squadElements);
 
   React.useEffect(() => {
     if (!season) return;
-    setFacts(readLocalFacts(season, gameweek, fingerprint));
-  }, [season, gameweek, fingerprint]);
+    setFacts(readLocalFacts(season, gameweek, fingerprint, squadKey));
+  }, [season, gameweek, fingerprint, squadKey]);
 
   if (!snapshot || !facts) return null;
 
@@ -119,10 +129,17 @@ export function DeadlineBoard() {
     rows.push({ key: "transfers", label: "Transfers", state: "missing", detail: "No hold or saved plan recorded for this gameweek.", href: "/transfers", action: "Plan" });
   }
 
+  const engine = facts.enginePlan;
+  const engineName = engine ? CHIP_NAMES[engine.chip] ?? engine.chip : null;
+  const engineGain = engine?.gain != null ? ` (+${engine.gain.toFixed(1)})` : "";
   if (facts.plannedThisWeek) {
     rows.push({ key: "chips", label: "Chips", state: "ready", detail: `${facts.plannedThisWeek} planned for GW${gameweek}.`, href: "/chips", action: "Open" });
+  } else if (engine && engine.gw === gameweek) {
+    rows.push({ key: "chips", label: "Chips", state: "review", detail: `The chip plan plays ${engineName} this week${engineGain}; you have not planned it.`, href: "/chips", action: "Review" });
   } else if (facts.inventoryEntered) {
-    rows.push({ key: "chips", label: "Chips", state: "ready", detail: "Chips entered; none planned this week.", href: "/chips", action: "Open" });
+    rows.push({ key: "chips", label: "Chips", state: "ready", detail: engine
+      ? `None this week. Next in the chip plan: ${engineName}, GW${engine.gw}${engineGain}.`
+      : "Chips entered; none planned this week.", href: "/chips", action: "Open" });
   } else {
     rows.push({ key: "chips", label: "Chips", state: "missing", detail: "You have not entered which chips you still have.", href: "/chips", action: "Enter" });
   }

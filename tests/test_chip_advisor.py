@@ -500,6 +500,26 @@ def test_blank_gameweek_gives_free_hit_a_real_comparison(monkeypatch, tmp_path):
     assert 'no_chip_total' in free_hit['evidence']
 
 
+def test_free_hit_and_wildcard_name_who_goes_out_and_comes_in(monkeypatch, tmp_path):
+    write_season(tmp_path, blank=True)
+    monkeypatch.chdir(tmp_path)
+    players = market().reset_index(drop=True)
+    squad = players.iloc[:15].copy()
+
+    data = compute_chips(squad, 'test-season', 2, 3, players,
+                         inventory=synced_inventory(),
+                         future_points=horizon_points(players, range(2, 20)))
+    owned = set(squad['element'])
+    for chip in ('free_hit', 'wildcard'):
+        evidence = next(rec for rec in data['recommendations'] if rec['chip'] == chip)['evidence']
+        out, came_in = evidence['players_out'], evidence['players_in']
+        assert len(out) == len(came_in) == evidence['changed_player_count'] > 0
+        assert {p['element'] for p in out} <= owned
+        assert not {p['element'] for p in came_in} & owned
+        points = [p['points'] for p in came_in]
+        assert points == sorted(points, reverse=True)
+
+
 def test_owned_unavailable_player_is_kept_by_identity(monkeypatch, tmp_path):
     write_season(tmp_path)
     monkeypatch.chdir(tmp_path)

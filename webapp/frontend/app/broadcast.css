@@ -1352,6 +1352,7 @@
   /* --- TRANSFER STUDIO: labelled steppers + portrait/badge presentation --- */
   .studio-field{display:flex;align-items:center;gap:8px}
   .studio-field .kicker{white-space:nowrap}
+  .studio-source{color:var(--muted-ink);font-size:var(--type-micro);white-space:nowrap}
   .stepper{display:inline-flex;align-items:stretch;border:1px solid rgba(255,255,255,.28);background:rgba(255,255,255,.06)}
   .stepper button{min-width:30px;border:0;background:transparent;color:var(--white);font:800 14px var(--data);
     cursor:pointer;transition:background var(--motion-fast),color var(--motion-fast)}
@@ -1859,6 +1860,9 @@
   .chip-why summary{font-size:var(--type-micro)}
   .chip-why ul{margin:8px 0 0;padding-left:18px;font-size:11px}
   .chip-why li{margin:4px 0}
+  .chip-changes{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:4px 16px;margin-top:8px;font-size:var(--type-micro)}
+  .chip-changes strong{color:var(--white);font:800 var(--type-micro) var(--display);letter-spacing:.08em;text-transform:uppercase}
+  .chip-changes .muted{color:var(--muted-light);opacity:.75}
   .chip-method p{max-width:80ch;margin:12px 0 0;font-size:12px}
   .transfer-onboarding{display:grid;justify-items:start;gap:var(--space-4);min-height:calc(100dvh - 220px);align-content:center}
   .transfer-onboarding h1{margin:0;font:900 clamp(2.3rem,6vw,5rem)/.9 var(--display);text-transform:uppercase;letter-spacing:-.05em}

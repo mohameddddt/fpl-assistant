@@ -603,6 +603,30 @@ def _captain_and_bench(result: dict, p_plays: pd.DataFrame, gw: int) -> dict:
     return out
 
 
+def _squad_changes(squad: pd.DataFrame, rebuilt: pd.DataFrame, point_matrix: pd.DataFrame,
+                   gameweeks: list[int]) -> dict:
+    """Who a rebuilt squad (Free Hit, Wildcard) sells and buys, with each
+    player's projection over the chip's weeks, highest first."""
+    current = {_player_key(r): idx for idx, r in squad.iterrows()}
+    new = {_player_key(r): idx for idx, r in rebuilt.iterrows()}
+    weeks = [gw for gw in gameweeks if gw in point_matrix.columns]
+
+    def listed(frame: pd.DataFrame, keys: list) -> list[dict]:
+        rows = []
+        for key in keys:
+            idx = current.get(key, new.get(key))
+            r = frame.loc[idx]
+            points = (float(point_matrix.loc[idx, weeks].sum())
+                      if weeks and idx in point_matrix.index else None)
+            rows.append({'player': str(r.get('name', '')), 'element': key,
+                         'team': str(r.get('team', '')), 'position': str(r.get('position', '')),
+                         'points': None if points is None else round(points, 2)})
+        return sorted(rows, key=lambda row: -(row['points'] or 0))
+
+    return {'players_out': listed(squad, [k for k in current if k not in new]),
+            'players_in': listed(rebuilt, [k for k in new if k not in current])}
+
+
 def _evaluate_candidate_week(opt, gw: int, squad: pd.DataFrame, point_matrix: pd.DataFrame,
                              p_plays: pd.DataFrame, reduced_players: pd.DataFrame,
                              chip_budget: float, cost_overrides: dict, current_ft: int,
@@ -632,16 +656,18 @@ def _evaluate_candidate_week(opt, gw: int, squad: pd.DataFrame, point_matrix: pd
             opt, reduced_players, point_matrix, gw, squad.index, chip_budget, cost_overrides, ft_this_week)
         if fh_total is not None and baseline_total is not None:
             week_gains['free_hit'] = fh_total - baseline_total
-            changed = 0
+            changed, changes = 0, {'players_out': [], 'players_in': []}
             if fh_result is not None:
                 fh_elements = {_player_key(r) for _, r in fh_result['squad'].iterrows()}
                 changed = len(current_elements - fh_elements)
+                changes = _squad_changes(squad, fh_result['squad'], point_matrix, [gw])
             week_evidence['free_hit'] = {
                 'chip': 'free_hit',
                 'free_hit_total': round(fh_total, 2),
                 'no_chip_total': round(baseline_total, 2),
                 'no_chip_free_transfers': ft_this_week,
                 'changed_player_count': changed,
+                **changes,
                 'xi': [] if fh_result is None else [
                     {'player': str(r.get('name', '')), 'element': _player_key(r)}
                     for _, r in fh_result['xi'].iterrows()
@@ -655,16 +681,18 @@ def _evaluate_candidate_week(opt, gw: int, squad: pd.DataFrame, point_matrix: pd
             squad.index, current_ft, policy)
         if wc_gain is not None:
             week_gains['wildcard'] = wc_gain
-            changed = 0
+            changed, changes = 0, {'players_out': [], 'players_in': []}
             if wc_result is not None:
                 wc_elements = {_player_key(r) for _, r in wc_result['squad'].iterrows()}
                 changed = len(current_elements - wc_elements)
+                changes = _squad_changes(squad, wc_result['squad'], point_matrix, window_gws)
             week_evidence['wildcard'] = {
                 'chip': 'wildcard',
                 'window_gameweeks': window_gws,
                 'truncated': len(window_gws) < policy.wildcard_window,
                 'wildcard_total': round(wc_total, 2) if wc_total is not None else None,
                 'changed_player_count': changed,
+                **changes,
             }
             # The squad a Wildcard builds is the one Triple Captain and Bench
             # Boost would be played with in the weeks after it, so their gains

@@ -14,8 +14,8 @@ import { ChipPlanTimeline } from "@/components/chips/chip-plan-timeline";
 import { BarStrip } from "@/components/charts/bar-strip";
 import { CountUp } from "@/components/motion/count-up";
 import { m, AnimatePresence } from "motion/react";
-import { CHIP_IDS, type ChipId, type ChipInventory, type ChipRecommendation, type ChipRow, type ChipsResult, type ChipState, type ChipStatus } from "@/lib/types";
-import { CHIP_INVENTORY_KEY } from "@/lib/storage-keys";
+import { CHIP_IDS, type ChipId, type ChipInventory, type ChipRecommendation, type ChipRow, type ChipSquadChange, type ChipsResult, type ChipState, type ChipStatus } from "@/lib/types";
+import { CHIP_INVENTORY_KEY, CHIP_PLAN_KEY, chipPlanSquadKey, type StoredChipPlan } from "@/lib/storage-keys";
 
 // The last gameweek of each half-season set, per the official 2026/27 chip
 // rules (two sets, split at the GW19 deadline).
@@ -308,6 +308,28 @@ function PlannedChipsPanel({
   );
 }
 
+function SquadChanges({ out, into, span }: { out?: ChipSquadChange[]; into?: ChipSquadChange[]; span: string }) {
+  if (!out?.length && !into?.length) return null;
+  const row = (player: ChipSquadChange) => (
+    <li key={player.element}>
+      {player.player} <span className="muted">{player.team} · {player.position}</span>
+      {player.points != null && <>: {num(player.points, 1)} pts</>}
+    </li>
+  );
+  return (
+    <div className="chip-changes">
+      <div>
+        <strong>Out</strong> <span className="muted">({span})</span>
+        <ul>{out?.map(row)}</ul>
+      </div>
+      <div>
+        <strong>In</strong> <span className="muted">({span})</span>
+        <ul>{into?.map(row)}</ul>
+      </div>
+    </div>
+  );
+}
+
 function WhyThisChoice({ recommendation, data }: { recommendation: ChipRecommendation; data: ChipsResult }) {
   const evidence = recommendation.evidence;
   return (
@@ -331,19 +353,29 @@ function WhyThisChoice({ recommendation, data }: { recommendation: ChipRecommend
         </>
       )}
       {evidence?.chip === "free_hit" && (
+        <>
         <p>
           A one-week squad projects {num(evidence.free_hit_total, 1)} points, against {num(evidence.no_chip_total, 1)} for
           the best transfer you could make instead with {evidence.no_chip_free_transfers} free transfer{evidence.no_chip_free_transfers === 1 ? "" : "s"}
           {" "}({evidence.changed_player_count} changed player{evidence.changed_player_count === 1 ? "" : "s"} on the one-week squad).
         </p>
+        <SquadChanges out={evidence.players_out} into={evidence.players_in} span={recommendation.gw != null ? "GW" + recommendation.gw : "that week"} />
+        </>
       )}
       {evidence?.chip === "wildcard" && (
+        <>
         <p>
           Rebuilding the squad projects {evidence.wildcard_total != null ? num(evidence.wildcard_total, 1) : "—"} points
           across GW{evidence.window_gameweeks[0]}–GW{evidence.window_gameweeks[evidence.window_gameweeks.length - 1]}
           {evidence.truncated ? " (season ends before a full 6-week window)" : ""}, against the best you could do with rolling free
           transfers over the same weeks ({evidence.changed_player_count} changed players).
         </p>
+        <SquadChanges
+          out={evidence.players_out}
+          into={evidence.players_in}
+          span={"GW" + evidence.window_gameweeks[0] + "–" + evidence.window_gameweeks[evidence.window_gameweeks.length - 1]}
+        />
+        </>
       )}
       {recommendation.candidate_gameweeks.length > 0 && (
         <p>
@@ -442,6 +474,18 @@ export default function ChipsPage() {
         if (requestId !== requestIdRef.current) return;
         if (res && res.ok) {
           setData(res);
+          if (res.has_squad && hasFullSquad && snapshot) {
+            const stored: StoredChipPlan = {
+              version: 1, season: snapshot.season, gameweek: res.current_gameweek,
+              squad: chipPlanSquadKey(squadIds),
+              plan: res.chip_plan.map((entry) => ({ chip: entry.chip, gw: entry.gw, gain: entry.gain })),
+            };
+            try {
+              window.localStorage.setItem(CHIP_PLAN_KEY, JSON.stringify(stored));
+            } catch {
+              // Storage blocked: the deadline board just won't name the plan.
+            }
+          }
         } else {
           setData(null);
           setFetchError("Unable to compute chip optimization recommendations.");

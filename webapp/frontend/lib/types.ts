@@ -386,12 +386,23 @@ export interface ChipBenchEvidence {
   expected_autosub_points: number;
 }
 
+export interface ChipSquadChange {
+  player: string;
+  element: number | string;
+  team: string;
+  position: string;
+  // Projection over the chip's weeks: the one week for Free Hit, the window for Wildcard.
+  points: number | null;
+}
+
 export interface ChipFreeHitEvidence {
   chip: "free_hit";
   free_hit_total: number;
   no_chip_total: number;
   no_chip_free_transfers: number;
   changed_player_count: number;
+  players_out?: ChipSquadChange[];
+  players_in?: ChipSquadChange[];
   xi: { player: string; element: number | string }[];
 }
 
@@ -401,6 +412,8 @@ export interface ChipWildcardEvidence {
   truncated: boolean;
   wildcard_total: number | null;
   changed_player_count: number;
+  players_out?: ChipSquadChange[];
+  players_in?: ChipSquadChange[];
 }
 
 export type ChipEvidence =

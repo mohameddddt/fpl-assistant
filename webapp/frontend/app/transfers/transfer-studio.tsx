@@ -78,7 +78,7 @@ export default function TransfersPage() {
   const [pendingOut, setPendingOut] = React.useState<number | null>(null);
   const [pendingIn, setPendingIn] = React.useState<number | null>(null);
   const [editingIndex, setEditingIndex] = React.useState<number | null>(null);
-  const [free, setFree] = React.useState(1);
+  const [freeOverride, setFreeOverride] = React.useState<number | null>(null);
   const [maxTransfers, setMaxTransfers] = React.useState(3);
   const [bankOverride, setBankOverride] = React.useState<number | null>(null);
   const [message, setMessage] = React.useState<string | null>(null);
@@ -99,6 +99,10 @@ export default function TransfersPage() {
   const [showReview, setShowReview] = React.useState(false);
 
   const bankTenths = bankOverride ?? financeSummary.bankTenths;
+  // Starts from the count the Chips page synced from FPL (or you entered there);
+  // changes here are a what-if for this draft and are not written back.
+  const sharedFree = storedSquad?.freeTransfers;
+  const free = freeOverride ?? sharedFree ?? 1;
   const fingerprint = snapshot ? squadFingerprint(snapshot.season, squadElements, storedSquad?.finance ?? null) : "";
   const sellPrices = sellingPricesTenthsForSquad(squadPlayers, storedSquad?.finance ?? null);
   const byElement = new Map((snapshot?.players ?? []).map((player) => [player.element, player]));
@@ -215,7 +219,7 @@ export default function TransfersPage() {
   function reopenSaved() {
     if (!savedPlan || savedPlan.fingerprint !== fingerprint) return;
     setDraft(savedPlan.pairs); setMaxTransfers(savedPlan.max_transfers);
-    setFree(savedPlan.free_transfers); setBankOverride(savedPlan.bank_tenths);
+    setFreeOverride(savedPlan.free_transfers); setBankOverride(savedPlan.bank_tenths);
     setPendingOut(null); setPendingIn(null); invalidate();
   }
   function saveDraft() {
@@ -250,7 +254,7 @@ export default function TransfersPage() {
     if (persistScenarios([...scenarios, value])) { setMessage(name + " saved on this device."); setResultTab("scenarios"); }
   }
   function loadScenario(scenario: SavedScenario) {
-    setDraft(scenario.pairs); setFree(scenario.free_transfers); setBankOverride(scenario.bank_tenths);
+    setDraft(scenario.pairs); setFreeOverride(scenario.free_transfers); setBankOverride(scenario.bank_tenths);
     setMaxTransfers(Math.max(maxTransfers, scenario.pairs.length));
     setPendingOut(null); setPendingIn(null); setEditingIndex(null); invalidate();
     setMessage(scenario.name + " loaded into the draft.");
@@ -344,10 +348,12 @@ export default function TransfersPage() {
         </div>
         <div className="studio-bar">
           <div className="studio-field"><span className="kicker">Free transfers</span><div className="stepper">
-            <button type="button" aria-label="Decrease free transfers" disabled={free <= 0} onClick={() => { setFree(free - 1); invalidate(); }}>−</button>
+            <button type="button" aria-label="Decrease free transfers" disabled={free <= 0} onClick={() => { setFreeOverride(free - 1); invalidate(); }}>−</button>
             <output className="data">{free}</output>
-            <button type="button" aria-label="Increase free transfers" disabled={free >= 5} onClick={() => { setFree(free + 1); invalidate(); }}>+</button>
-          </div></div>
+            <button type="button" aria-label="Increase free transfers" disabled={free >= 5} onClick={() => { setFreeOverride(free + 1); invalidate(); }}>+</button>
+          </div>{freeOverride == null && sharedFree != null && (
+            <small className="studio-source">{storedSquad?.freeTransfersSource === "fpl_sync" ? "Synced from FPL" : "From Chips page"}</small>
+          )}</div>
           <div className="studio-field"><span className="kicker">Bank</span><div className="stepper">
             <button type="button" aria-label="Decrease bank by £0.1m" disabled={bankTenths <= 0} onClick={() => { setBankOverride(Math.max(0, bankTenths - 1)); invalidate(); }}>−</button>
             <output className="data">{money(fromTenths(bankTenths))}</output>
