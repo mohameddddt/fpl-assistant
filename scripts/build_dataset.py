@@ -365,6 +365,54 @@ def overlay_fotmob_defensive(df: pd.DataFrame) -> pd.DataFrame:
     return merged
 
 
+def keep_fotmob_seasons(new: pd.DataFrame, current: pd.DataFrame | None) -> pd.DataFrame:
+    """Keep a season's existing rows where this build would lose its FotMob stats.
+
+    data/<season>/fotmob/ is not committed, so on a machine without the
+    backfill overlay_fotmob_defensive finds nothing and the FBref seasons fall
+    back to FBref: one routine refresh rewrote the defensive stats of 65,753
+    rows in 2019-25 and the DefCon-adjusted points of 8,650, undoing the
+    corrected history the models were trained on. A season is carried over
+    only when the file being replaced has FotMob rows for it, this build has
+    none, and it is not the latest season (those rows still change).
+    """
+    if current is None or 'defensive_source' not in current.columns:
+        return new
+    latest = new['season'].max()
+    had = set(current.loc[current['defensive_source'] == 'fotmob', 'season'])
+    has = set(new.loc[new['defensive_source'] == 'fotmob', 'season'])
+    carry = sorted(s for s in had - has if s != latest)
+    if not carry:
+        return new
+
+    def refuse(why: str):
+        raise SystemExit(
+            f"FotMob stats for {', '.join(carry)} are missing (no data/<season>/fotmob/"
+            f"player_match.csv) and {why}, so the existing rows cannot be kept. Run "
+            "scripts/fetch_fotmob.py --backfill for those seasons, or pass "
+            "--allow-fotmob-downgrade to fall back to FBref.")
+
+    if list(current.columns) != list(new.columns):
+        refuse("the columns changed")
+    # Swapped in place, matched on JOIN_KEYS: the file is ordered by player,
+    # not by season, so the rows of a season are not one block.
+    out = new.copy()
+    current = current.reset_index(drop=True)
+    for season in carry:
+        here = out.index[out['season'] == season]
+        mine = current[current['season'] == season]
+        source = (out.loc[here, JOIN_KEYS]
+                  .merge(mine[JOIN_KEYS].reset_index(), on=JOIN_KEYS, how='left')['index'])
+        if len(mine) != len(here) or source.isna().any() or source.duplicated().any():
+            refuse(f"{season}'s rows no longer match one for one")
+        for col in out.columns:
+            out.loc[here, col] = current.loc[source.astype(int), col].to_numpy()
+    print(f"\n  FotMob files missing for {', '.join(carry)}: keeping those seasons' rows "
+          f"from the file being replaced instead of falling back to FBref "
+          f"(--allow-fotmob-downgrade to rebuild them anyway)")
+    return out
+
+
 def derive_fixture_teams(df: pd.DataFrame) -> pd.DataFrame:
     """Set each row's club to the side it played for in that fixture.
 
@@ -684,6 +732,9 @@ def main() -> int:
                          'other seasons populate')
     ap.add_argument('--allow-missing-defensive', action='store_true',
                     help='build even with no defensive stats to carry over')
+    ap.add_argument('--allow-fotmob-downgrade', action='store_true',
+                    help='rebuild seasons whose FotMob files are missing from FBref, '
+                         'instead of keeping their existing rows')
     args = ap.parse_args()
 
     # Preserve the original before this run overwrites it, since it is the only
@@ -733,6 +784,15 @@ def main() -> int:
     final = add_player_ids(final)
     # 2021-22 labels 101 keeper rows 'GKP'; every model filters on 'GK'.
     final['position'] = final['position'].replace({'GKP': 'GK'})
+    # One on-disk format whatever the pandas version. Under pandas 3 was_home
+    # stays a bool (written True/False) and game_number a nullable Int64, so a
+    # rebuild there rewrote every line of a file built under pandas 2 (0/1).
+    if final['was_home'].dtype == bool:
+        final['was_home'] = final['was_home'].astype(int)
+    if str(final['game_number'].dtype) == 'Int64' and not final['game_number'].isna().any():
+        final['game_number'] = final['game_number'].astype('int64')
+    if not args.allow_fotmob_downgrade and os.path.exists(FINAL_OUT):
+        final = keep_fotmob_seasons(final, read_csv_tolerant(FINAL_OUT))
     report(final, allow_empty_columns=args.allow_empty_columns)
 
     if args.write:

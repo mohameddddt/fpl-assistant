@@ -101,3 +101,45 @@ def test_fotmob_defensive_counts_replace_fbref_where_present(tmp_path, monkeypat
 def test_defensive_contribution_bonus_thresholds(position, contribution, bonus) -> None:
     row = {'total_points': 1, 'position': position, 'defensive_contribution': contribution}
     assert bd.calculate_modified_points(row) == 1 + bonus
+
+
+# ------------------------------------------------------- FotMob-less rebuilds
+def _frame(rows):
+    return pd.DataFrame(rows, columns=['season', 'element', 'fixture', 'recoveries',
+                                       'defensive_source'])
+
+
+def test_a_season_that_would_lose_its_fotmob_stats_keeps_its_rows_in_place():
+    # Ordered by player, not season, as the real file is.
+    current = _frame([('2023-24', 1, 10, 9, 'fotmob'), ('2025-26', 1, 20, 4, 'fpl'),
+                      ('2023-24', 2, 10, 7, 'fotmob'), ('2026-27', 1, 30, 2, 'fpl')])
+    # This machine has no FotMob files: 2023-24 fell back to FBref.
+    new = _frame([('2023-24', 1, 10, 3, 'fbref'), ('2025-26', 1, 20, 4, 'fpl'),
+                  ('2026-27', 1, 30, 2, 'fpl'), ('2026-27', 1, 31, 5, 'fpl'),
+                  ('2023-24', 2, 10, 1, 'fbref')])
+    out = bd.keep_fotmob_seasons(new, current)
+    assert out['element'].tolist() == [1, 1, 1, 1, 2]
+    assert out['recoveries'].tolist() == [9, 4, 2, 5, 7]
+    assert out['defensive_source'].tolist() == ['fotmob', 'fpl', 'fpl', 'fpl', 'fotmob']
+
+
+def test_a_build_that_has_fotmob_is_left_alone():
+    current = _frame([('2023-24', 1, 10, 9, 'fotmob'), ('2026-27', 1, 30, 2, 'fpl')])
+    new = _frame([('2023-24', 1, 10, 8, 'fotmob'), ('2026-27', 1, 30, 2, 'fpl')])
+    assert bd.keep_fotmob_seasons(new, current)['recoveries'].tolist() == [8, 2]
+
+
+def test_the_latest_season_is_never_carried_over():
+    current = _frame([('2026-27', 1, 30, 9, 'fotmob')])
+    new = _frame([('2026-27', 1, 30, 3, 'fpl'), ('2026-27', 1, 31, 4, 'fpl')])
+    assert bd.keep_fotmob_seasons(new, current)['recoveries'].tolist() == [3, 4]
+
+
+def test_changed_columns_or_rows_refuse_rather_than_mix_builds():
+    current = _frame([('2023-24', 1, 10, 9, 'fotmob'), ('2026-27', 1, 30, 2, 'fpl')])
+    wider = _frame([('2023-24', 1, 10, 3, 'fbref'), ('2026-27', 1, 30, 2, 'fpl')]).assign(extra=1)
+    with pytest.raises(SystemExit, match='columns changed'):
+        bd.keep_fotmob_seasons(wider, current)
+    moved = _frame([('2023-24', 1, 11, 3, 'fbref'), ('2026-27', 1, 30, 2, 'fpl')])
+    with pytest.raises(SystemExit, match='one for one'):
+        bd.keep_fotmob_seasons(moved, current)
